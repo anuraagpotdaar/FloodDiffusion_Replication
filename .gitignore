@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editors
+.idea/
+.vscode/
+
+# Runtime artifacts
+*.jsonl
+telemetry.jsonl
+*.log
+
+# Hugging Face / Torch caches
+.cache/
+hf_cache/

@@ -590,13 +590,40 @@ if __name__ == "__main__":
         default=7860,
         help="Port to run the server on (default: 7860)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Write debug_log_for_anuraag_<timestamp>.log at the repo root with "
+             "system + runtime telemetry (env, torch/MPS state, per-step timings, "
+             "buffer underruns, thermal samples, final p50/p95/p99 summary)",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Requires --debug. Run torch.profiler over 100 generation steps "
+             "after warmup and dump a Chrome trace JSON next to the debug log. "
+             "Trace can be 5-50 MB.",
+    )
     args = parser.parse_args()
 
+    if args.profile and not args.debug:
+        parser.error("--profile requires --debug")
+
     model_name_global = args.model_name
+
+    if args.debug:
+        telemetry.start_debug(profile_enabled=args.profile)
+        print(f"[debug] writing diagnostics to {telemetry.get_debug().log_path}")
+        if args.profile:
+            import model_manager as _mm
+            _mm.PROFILE_REQUESTED = True
 
     # Load model eagerly on startup (pre-downloaded in Docker)
     print(f"Loading model: {model_name_global}")
     init_model()
+
+    if args.debug:
+        telemetry.get_debug().write_model_snapshot(model_manager)
 
     print("Starting Flask server...")
     app.run(host="0.0.0.0", port=args.port, debug=False, threaded=True)

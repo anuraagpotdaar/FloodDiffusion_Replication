@@ -20,3 +20,6 @@ telemetry.jsonl
 # Hugging Face / Torch caches
 .cache/
 hf_cache/
+
+# Local notes (sensitive)
+notes/

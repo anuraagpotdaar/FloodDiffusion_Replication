@@ -13,6 +13,13 @@ import torch
 from motion_process import StreamJointRecovery263
 import telemetry
 
+# Set by app.py when --debug --profile is passed. When True, the generation
+# loop wraps PROFILE_STEPS steps after warmup with torch.profiler and dumps
+# a Chrome trace + an op-summary table into the debug log.
+PROFILE_REQUESTED = False
+PROFILE_WARMUP_STEPS = 10
+PROFILE_STEPS = 100
+
 
 class FrameBuffer:
     """
@@ -456,6 +463,56 @@ class ModelManager:
         step_count = 0
         total_gen_time = 0
 
+        # Profiler state. Activates once after warmup completes; runs for
+        # PROFILE_STEPS, then dumps the trace and disables itself.
+        prof = None
+        prof_steps_remaining = 0
+        prof_done = False
+
+        def _maybe_start_profiler():
+            nonlocal prof, prof_steps_remaining, prof_done
+            if not PROFILE_REQUESTED or prof is not None or prof_done:
+                return
+            if step_count < PROFILE_WARMUP_STEPS:
+                return
+            try:
+                from torch.profiler import profile, ProfilerActivity
+                acts = [ProfilerActivity.CPU]
+                if torch.cuda.is_available():
+                    acts.append(ProfilerActivity.CUDA)
+                prof = profile(activities=acts, record_shapes=False)
+                prof.__enter__()
+                prof_steps_remaining = PROFILE_STEPS
+                print(f"[profile] started after warmup; capturing {PROFILE_STEPS} steps")
+            except Exception as e:
+                print(f"[profile] failed to start: {e}")
+                prof_done = True
+
+        def _maybe_finish_profiler():
+            nonlocal prof, prof_steps_remaining, prof_done
+            if prof is None or prof_steps_remaining > 0:
+                return
+            try:
+                prof.__exit__(None, None, None)
+                table = prof.key_averages().table(
+                    sort_by="self_cpu_time_total", row_limit=20
+                )
+                trace_written = False
+                dbg = telemetry.get_debug()
+                if dbg is not None:
+                    try:
+                        prof.export_chrome_trace(dbg.trace_path)
+                        trace_written = True
+                    except Exception as e:
+                        print(f"[profile] export_chrome_trace failed: {e}")
+                    dbg.write_profiler_summary(table, trace_written)
+                print("[profile] window complete; trace dumped")
+            except Exception as e:
+                print(f"[profile] finalize error: {e}")
+            finally:
+                prof = None
+                prof_done = True
+
         last_action_done_logged = False
         with torch.no_grad():
             while not self.should_stop:
@@ -536,6 +593,11 @@ class ModelManager:
                         step_time = time.time() - step_start
                         total_gen_time += step_time
                         step_count += 1
+                        if prof is not None and prof_steps_remaining > 0:
+                            prof_steps_remaining -= 1
+                            _maybe_finish_profiler()
+                        else:
+                            _maybe_start_profiler()
                         n_produced = int(decoded.shape[0])
                         telemetry.log("gen_step_end", step=step_count,
                                       text=snapshot_text,
@@ -564,6 +626,12 @@ class ModelManager:
                 else:
                     # Buffer is full, wait a bit
                     time.sleep(0.01)
+
+        # If profiler was mid-capture when the loop exited, force-finalize so
+        # the trace file isn't leaked.
+        if prof is not None:
+            prof_steps_remaining = 0
+            _maybe_finish_profiler()
 
         print("Generation loop stopped")
 
